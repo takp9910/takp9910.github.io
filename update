@@ -1,9 +1,8 @@
-
 <!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<title>2D Dota v2 — Fog of War</title>
+<title>2D Dota v3 — Big Map & Items</title>
 <style>
   html,body{margin:0;background:#050805;height:100%;display:flex;flex-direction:column;
     align-items:center;justify-content:center;font-family:Consolas,monospace;color:#7a8a7a;overflow:hidden;}
@@ -17,7 +16,7 @@
 <canvas id="game"></canvas>
 <div class="hint">
   <b>WASD</b> движение · <b>Q</b> скиллшот · <b>F</b> АоЕ · <b>E</b> хил · <b>R</b> ульта ·
-  <b>1–5</b> или клик по слоту — магазин (у базы) · <b>P</b> пауза
+  <b>1–0</b> или клик по слоту — магазин/применение · <b>P</b> пауза
 </div>
 <script>
 (() => {
@@ -26,12 +25,13 @@
 // ============ КОНСТАНТЫ ============
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const W = 1200, H = 720, BH = 150, VH = H - BH;   // BH — высота нижней панели
+const W = 1200, H = 720, BH = 150, VH = H - BH;
 canvas.width = W; canvas.height = H;
 
-const WORLD_W = 2000, WORLD_H = 1400;
-const LANES = [250, 700, 1150];
-const BASE = { 0:{x:150, y:700}, 1:{x:1850, y:700} };
+const WORLD_W = 3200, WORLD_H = 1800;
+const LANES = [300, 900, 1500];
+const BASE = { 0:{x:220, y:900}, 1:{x:2980, y:900} };
+const TOWER_X = { 0:1200, 1:2000 };
 const VISION = { hero: 520, creep: 400, tower: 560, throne: 720 };
 
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -56,41 +56,72 @@ function ent(o){
     hp:100, maxHp:100, atk:10, range:80, atkCd:0, atkInterval:1,
     speed:80, aggro:220, alive:true, target:null, respawn:0,
     qCd:0, wCd:0, eCd:0, rCd:0, mp:0, maxMp:0, lane:1,
-    regen:0, mpRegen:0, k:0, d:0, cs:0, fleeing:false, lastHit:null
+    regen:0, mpRegen:0, k:0, d:0, cs:0, fleeing:false, lastHit:null,
+    stun:0, silence:0, ethereal:0
   }, o);
 }
 
+// ============ ПРЕДМЕТЫ ============
+const ITEMS = [
+  { key:'1', name:'Меч', ch:'М', cost:150, desc:'+15 к урону', apply:h=>{ h.atk+=15; } },
+  { key:'2', name:'Щит', ch:'Щ', cost:200, desc:'+300 к макс. HP', apply:h=>{ h.maxHp+=300; h.hp+=300; } },
+  { key:'3', name:'Сапоги', ch:'С', cost:100, desc:'+30 к скорости', apply:h=>{ h.speed+=30; } },
+  { key:'4', name:'Посох', ch:'П', cost:150, desc:'+120 к макс. MP', apply:h=>{ h.maxMp+=120; h.mp+=120; } },
+  { key:'5', name:'Топор Богов', ch:'Т', cost:800, desc:'+60 к урону', apply:h=>{ h.atk+=60; } },
+
+  { key:'6', name:'Кристалл Времени', ch:'К', cost:700, unique:true,
+    desc:'−20% перезарядки способностей. Уникальный, не апгрейдится',
+    apply:h=>{ h.cdMul *= 0.8; } },
+
+  { key:'7', name:'Сфера Жизни', ch:'Ж', cost:650, unique:true,
+    desc:'+5 HP/с и +8 MP/с. Уникальный, не апгрейдится',
+    apply:h=>{ h.regen += 5; h.mpRegen += 8; } },
+
+  { key:'8', name:'Молот Оцепенения', ch:'О', cost:700, unique:true, active:true, cd:20,
+    desc:'Оглушает врага на 1.6с (до 500). CD 20с',
+    use:i=>useEffectItem(i,'stun',1.6) },
+
+  { key:'9', name:'Печать Безмолвия', ch:'Б', cost:600, unique:true, active:true, cd:18,
+    desc:'Накладывает безмолвие на 3с (до 500). CD 18с',
+    use:i=>useEffectItem(i,'silence',3.0) },
+
+  { key:'0', name:'Призрачный Плащ', ch:'Ф', cost:550, unique:true, active:true, cd:25,
+    desc:'Бесплотность врагу 2.5с: не бьёт, иммунен к физ., +40% магии. CD 25с',
+    use:i=>useEffectItem(i,'ethereal',2.5) },
+];
+
+const EFF_LABEL = { stun:'ОЦЕПЕНЕНИЕ', silence:'БЕЗМОЛВИЕ', ethereal:'БЕСПЛОТНОСТЬ' };
+const EFF_COLOR = { stun:'#ffd23e', silence:'#c8f', ethereal:'#8df' };
+
+// ============ ГЕРОИ ============
 const player = ent({
   type:'hero', team:0, x:BASE[0].x+40, y:BASE[0].y, r:15,
   hp:750, maxHp:750, atk:45, range:175, atkInterval:.85,
-  speed:200, aggro:200, mp:280, maxMp:280, regen:3, mpRegen:14
+  speed:200, aggro:200, mp:280, maxMp:280, regen:3, mpRegen:14, cdMul:1
 });
-player.inv = [0,0,0,0,0];
+player.inv = ITEMS.map(()=>0);
+player.icd = ITEMS.map(()=>0);
+
 const bot = ent({
   type:'hero', team:1, x:BASE[1].x-40, y:BASE[1].y, r:15,
   hp:750, maxHp:750, atk:38, range:175, atkInterval:1,
   speed:190, aggro:200, mp:280, maxMp:280, regen:3, mpRegen:10
 });
+bot.inv = ITEMS.map(()=>0);
+
 entities.push(player, bot);
 camY = clamp(player.y - VH/2, 0, WORLD_H - VH);
 
 for (const lane of [0,1,2]){
-  entities.push(ent({ type:'tower', team:0, x:750, y:LANES[lane], r:26,
+  entities.push(ent({ type:'tower', team:0, x:TOWER_X[0], y:LANES[lane], r:26,
     hp:1500, maxHp:1500, atk:75, range:240, atkInterval:1, aggro:240, lane }));
-  entities.push(ent({ type:'tower', team:1, x:1250, y:LANES[lane], r:26,
+  entities.push(ent({ type:'tower', team:1, x:TOWER_X[1], y:LANES[lane], r:26,
     hp:1500, maxHp:1500, atk:75, range:240, atkInterval:1, aggro:240, lane }));
 }
 entities.push(ent({ type:'throne', team:0, x:BASE[0].x, y:BASE[0].y, r:42, hp:2400, maxHp:2400, atk:0, range:0, aggro:0 }));
 entities.push(ent({ type:'throne', team:1, x:BASE[1].x, y:BASE[1].y, r:42, hp:2400, maxHp:2400, atk:0, range:0, aggro:0 }));
 
-// ============ ПРЕДМЕТЫ И СПОСОБНОСТИ ============
-const ITEMS = [
-  { key:'1', name:'Меч',         ch:'М', cost:150, st:'atk',   d:15,  lab:'урон' },
-  { key:'2', name:'Щит',         ch:'Щ', cost:200, st:'maxHp', d:300, lab:'макс. HP' },
-  { key:'3', name:'Сапоги',      ch:'С', cost:100, st:'speed', d:30,  lab:'скорость' },
-  { key:'4', name:'Посох',       ch:'П', cost:150, st:'maxMp', d:120, lab:'макс. MP' },
-  { key:'5', name:'Топор Богов', ch:'Т', cost:800, st:'atk',   d:60,  lab:'урон' },
-];
+// ============ СПОСОБНОСТИ ============
 const ABIL = [
   { k:'Q', name:'Скиллшот', cd:'qCd', max:4,  mp:40,  col:'#6cf', desc:'Снаряд в сторону курсора. Урон 115.' },
   { k:'F', name:'АоЕ',      cd:'wCd', max:8,  mp:60,  col:'#fa6', desc:'Зона радиуса 120 под курсором. Через 0.65с урон 190.' },
@@ -98,7 +129,7 @@ const ABIL = [
   { k:'R', name:'Ульта',    cd:'rCd', max:45, mp:120, col:'#f6c', desc:'Урон 320 всем врагам в радиусе 230 вокруг вас.' },
 ];
 const slotA = i => ({ x:494+i*70, y:VH+22, s:60 });
-const slotI = i => ({ x:782+i*38, y:VH+26, s:34 });
+const slotI = i => ({ x:720 + (i%5)*36, y:VH + (i<5?22:56), s:32 });
 const hit = (x,y,w,h) => mouse.sx>=x && mouse.sx<=x+w && mouse.sy>=y && mouse.sy<=y+h;
 
 // ============ ВВОД ============
@@ -115,7 +146,8 @@ window.addEventListener('keydown', e => {
   if (k==='KeyF') useW();
   if (k==='KeyE') useE();
   if (k==='KeyR'){ if (gameOver) location.reload(); else useR(); }
-  if (k.startsWith('Digit')) buy(+k.slice(5)-1);
+  const dm = k.match(/^Digit([0-9])$/);
+  if (dm){ const n = +dm[1]; slotAction(n===0 ? 9 : n-1); }
 });
 window.addEventListener('keyup', e => { keys[e.code]=false; });
 window.addEventListener('blur', () => { for (const k in keys) keys[k]=false; });
@@ -127,53 +159,106 @@ canvas.addEventListener('mousemove', e => {
 canvas.addEventListener('mousedown', () => {
   if (!started){ started = true; return; }
   if (paused) return;
-  ITEMS.forEach((_, i) => { const s = slotI(i); if (hit(s.x, s.y, s.s, s.s)) buy(i); });
+  ITEMS.forEach((_, i) => { const s = slotI(i); if (hit(s.x, s.y, s.s, s.s)) slotAction(i); });
 });
 
-// ============ СПОСОБНОСТИ ============
+function slotAction(i){
+  const it = ITEMS[i]; if (!it) return;
+  if (it.active && player.inv[i] > 0) return useActive(i);
+  buy(i);
+}
+function useActive(i){
+  const it = ITEMS[i];
+  if (!it || !it.active || player.inv[i] <= 0) return;
+  it.use(i);
+}
+
+// ============ СПОСОБНОСТИ ИГРОКА ============
 function worldMouse(){ return { x: mouse.sx + camX, y: mouse.sy + camY }; }
 
+function canCast(){
+  if (gameOver || !player.alive) return false;
+  if (player.stun > 0){ msg('Вы оглушены'); return false; }
+  if (player.silence > 0){ msg('Вы безмолвны'); return false; }
+  return true;
+}
+
 function useQ(){
-  if (gameOver || !player.alive || player.qCd>0 || player.mp<40) return;
-  player.qCd=4; player.mp-=40;
+  if (!canCast() || player.qCd>0 || player.mp<40) return;
+  player.qCd = 4 * player.cdMul; player.mp -= 40;
   const m = worldMouse(), dx = m.x-player.x, dy = m.y-player.y, l = Math.hypot(dx,dy) || 1;
   projectiles.push({ x:player.x, y:player.y, vx:dx/l*740, vy:dy/l*740, r:12, dmg:115,
     team:0, owner:player, life:1.4, color:'#6cf' });
 }
 function useW(){
-  if (gameOver || !player.alive || player.wCd>0 || player.mp<60) return;
-  player.wCd=8; player.mp-=60;
+  if (!canCast() || player.wCd>0 || player.mp<60) return;
+  player.wCd = 8 * player.cdMul; player.mp -= 60;
   const m = worldMouse();
   aoes.push({ x:clamp(m.x,0,WORLD_W), y:clamp(m.y,0,WORLD_H), r:120, t:.65, maxT:.65, dmg:190, team:0 });
 }
 function useE(){
-  if (gameOver || !player.alive || player.eCd>0 || player.mp<60) return;
+  if (!canCast() || player.eCd>0 || player.mp<60) return;
   if (player.hp >= player.maxHp) return msg('HP уже полное');
-  player.eCd=10; player.mp-=60;
+  player.eCd = 10 * player.cdMul; player.mp -= 60;
   player.hp = Math.min(player.maxHp, player.hp+240);
   particles.push({ x:player.x, y:player.y, r:10, t:.6, maxT:.6, color:'#4ae24a' });
   addFloat(player.x, player.y-30, '+240', '#5e5');
 }
 function useR(){
-  if (gameOver || !player.alive || player.rCd>0 || player.mp<120) return;
-  player.rCd=45; player.mp-=120;
+  if (!canCast() || player.rCd>0 || player.mp<120) return;
+  player.rCd = 45 * player.cdMul; player.mp -= 120;
   for (const e of entities)
-    if (e.alive && e.team!==0 && e.hp>0 && dist(player,e) < 230 + e.r) dealDamage(e, 320, player);
+    if (e.alive && e.team!==0 && e.hp>0 && dist(player,e) < 230 + e.r) dealDamage(e, 320, player, 'magic');
   particles.push({ x:player.x, y:player.y, r:30, t:.7, maxT:.7, color:'#f6c' });
   particles.push({ x:player.x, y:player.y, r:60, t:.9, maxT:.9, color:'#c8f' });
 }
+
+// ============ АКТИВНЫЕ ПРЕДМЕТЫ ============
+function findItemTarget(maxRange){
+  const m = worldMouse();
+  let best=null, bd=1e9;
+  for (const e of entities){
+    if (!e.alive || e.team!==1 || e.hp<=0 || e.type==='throne') continue;
+    const d = Math.hypot(e.x-m.x, e.y-m.y);
+    if (d < e.r+18 && d < bd){ bd=d; best=e; }
+  }
+  if (best && dist(player,best) <= maxRange) return best;
+  let near=null, nd=1e9;
+  for (const e of entities){
+    if (!e.alive || e.team!==1 || e.hp<=0 || e.type==='throne') continue;
+    const d = dist(player,e);
+    if (d <= maxRange && d < nd){ nd=d; near=e; }
+  }
+  return near;
+}
+function applyEffect(t, eff, dur){
+  t[eff] = Math.max(t[eff]||0, dur);
+  addFloat(t.x, t.y - t.r - 22, EFF_LABEL[eff], EFF_COLOR[eff]);
+}
+function useEffectItem(i, eff, dur){
+  if (gameOver || !started || paused || !player.alive) return;
+  if (player.stun > 0) return msg('Вы оглушены');
+  if (player.icd[i] > 0) return msg('Перезарядка: '+player.icd[i].toFixed(1)+'с');
+  const t = findItemTarget(500);
+  if (!t) return msg('Нет врага под мышью или рядом (до 500)');
+  player.icd[i] = ITEMS[i].cd;
+  applyEffect(t, eff, dur);
+  particles.push({ x:t.x, y:t.y, r:18, t:.5, maxT:.5, color:EFF_COLOR[eff] });
+  msg(ITEMS[i].name+': '+EFF_LABEL[eff]);
+}
+
+// ============ ПОКУПКА ============
 function buy(i){
-  if (gameOver || !player.alive) return;
-  if (dist(player, BASE[0]) > 260) return msg('Подойди к базе (слева)');
+  if (gameOver || !player.alive || !started || paused) return;
+  if (dist(player, BASE[0]) > 300) return msg('Подойди к базе (слева)');
   const it = ITEMS[i];
   if (!it) return;
+  if (it.unique && player.inv[i] > 0) return msg('Уникальный предмет — уже куплен');
   if (gold < it.cost) return msg('Мало золота: нужно '+it.cost);
   gold -= it.cost;
-  player[it.st] += it.d;
-  if (it.st==='maxHp') player.hp += it.d;
-  if (it.st==='maxMp') player.mp += it.d;
   player.inv[i]++;
-  msg('Куплено: '+it.name+' (+'+it.d+' '+it.lab+')');
+  if (it.apply) it.apply(player);
+  msg('Куплено: '+it.name);
 }
 
 // ============ БОЙ ============
@@ -182,6 +267,7 @@ function findTarget(e){
   let best=null, bestScore=Infinity;
   for (const o of entities){
     if (!o.alive || o.hp<=0 || o.team===e.team) continue;
+    if (o.ethereal > 0) continue;   // бесплотных не бьют физически
     const d = dist(e,o);
     if (d > aggro + o.r) continue;
     let score = d;
@@ -194,11 +280,16 @@ function findTarget(e){
 
 const towersLeft = team => entities.filter(o => o.type==='tower' && o.team===team && o.alive).length;
 
-function dealDamage(t, amount, src){
+function dealDamage(t, amount, src, type){
+  type = type || 'phys';
   if (!t.alive || t.hp<=0) return;
   if (t.type==='throne' && towersLeft(t.team) > 0){
     if (src===player && msgT<=0) msg('Трон неуязвим, пока стоят башни');
     return;
+  }
+  if (t.ethereal > 0){
+    if (type === 'phys') return;                  // иммунитет к физическому
+    if (type === 'magic') amount = Math.round(amount*1.4);
   }
   t.hp -= amount;
   t.lastHit = src;
@@ -236,7 +327,7 @@ function moveToward(e, tx, ty, dt){
 }
 
 function regenHero(h, dt){
-  const f = dist(h, BASE[h.team]) < 200;   // фонтан у базы лечит быстрее
+  const f = dist(h, BASE[h.team]) < 200;
   h.hp = Math.min(h.maxHp, h.hp + (h.regen + (f?50:0))*dt);
   h.mp = Math.min(h.maxMp, h.mp + (h.mpRegen + (f?30:0))*dt);
 }
@@ -244,6 +335,12 @@ function regenHero(h, dt){
 // ============ UPDATE ============
 function updatePlayer(dt){
   if (!player.alive) return;
+  regenHero(player, dt);
+  gold += dt;
+  for (const c of ['qCd','wCd','eCd','rCd']) player[c] = Math.max(0, player[c]-dt);
+  for (let i=0;i<player.icd.length;i++) player.icd[i] = Math.max(0, player.icd[i]-dt);
+  if (player.stun > 0) return;
+
   let dx=0, dy=0;
   if (keys['KeyW']||keys['ArrowUp'])    dy-=1;
   if (keys['KeyS']||keys['ArrowDown'])  dy+=1;
@@ -254,16 +351,17 @@ function updatePlayer(dt){
     player.x = clamp(player.x + dx/l*player.speed*dt, player.r, WORLD_W-player.r);
     player.y = clamp(player.y + dy/l*player.speed*dt, player.r, WORLD_H-player.r);
   }
-  regenHero(player, dt);
-  gold += dt;   // пассивный доход 1 золото/с
-  for (const c of ['qCd','wCd','eCd','rCd']) player[c] = Math.max(0, player[c]-dt);
 }
 
 function updateBot(dt){
   if (!bot.alive) return;
   regenHero(bot, dt);
-  bot.qCd = Math.max(0, bot.qCd-dt); bot.eCd = Math.max(0, bot.eCd-dt); bot.rCd = Math.max(0, bot.rCd-dt);
+  bot.qCd = Math.max(0, bot.qCd-dt);
+  bot.eCd = Math.max(0, bot.eCd-dt);
+  bot.rCd = Math.max(0, bot.rCd-dt);
+  if (bot.stun > 0) return;
 
+  const canCast = bot.silence <= 0;
   const hpPct = bot.hp/bot.maxHp;
   if (hpPct < 0.34) bot.fleeing = true; else if (hpPct > 0.8) bot.fleeing = false;
 
@@ -272,7 +370,7 @@ function updateBot(dt){
   } else {
     let best=null, bestD=Infinity;
     for (const o of entities){
-      if (!o.alive || o.hp<=0 || o.team!==0) continue;
+      if (!o.alive || o.hp<=0 || o.team!==0 || o.ethereal>0) continue;
       let s = dist(bot,o);
       if (o===player) s -= 80;
       if (s < bestD){ bestD=s; best=o; }
@@ -281,19 +379,19 @@ function updateBot(dt){
       if (bestD > bot.range + best.r - 20) moveToward(bot, best.x, best.y, dt);
     } else moveToward(bot, BASE[0].x+80, LANES[1], dt);
 
-    if (bot.qCd<=0 && bot.mp>=40 && player.alive && dist(bot,player) < 620){
+    if (canCast && bot.qCd<=0 && bot.mp>=40 && player.alive && dist(bot,player) < 620){
       bot.qCd=5; bot.mp-=40;
       const dx=player.x-bot.x, dy=player.y-bot.y, l=Math.hypot(dx,dy)||1;
       projectiles.push({ x:bot.x, y:bot.y, vx:dx/l*680, vy:dy/l*680, r:12, dmg:95, team:1, owner:bot, life:1.4, color:'#f88' });
     }
-    if (bot.rCd<=0 && bot.mp>=120 && player.alive && dist(bot,player) < 200){
+    if (canCast && bot.rCd<=0 && bot.mp>=120 && player.alive && dist(bot,player) < 200){
       bot.rCd=50; bot.mp-=120;
       for (const e of entities)
-        if (e.alive && e.team===0 && e.hp>0 && dist(bot,e) < 220 + e.r) dealDamage(e, 260, bot);
+        if (e.alive && e.team===0 && e.hp>0 && dist(bot,e) < 220 + e.r) dealDamage(e, 260, bot, 'magic');
       particles.push({ x:bot.x, y:bot.y, r:30, t:.7, maxT:.7, color:'#f6c' });
     }
   }
-  if (hpPct < 0.5 && bot.eCd<=0 && bot.mp>=60){
+  if (canCast && hpPct < 0.5 && bot.eCd<=0 && bot.mp>=60){
     bot.eCd=12; bot.mp-=60;
     bot.hp = Math.min(bot.maxHp, bot.hp+200);
     particles.push({ x:bot.x, y:bot.y, r:10, t:.5, maxT:.5, color:'#4ae24a' });
@@ -303,6 +401,7 @@ function updateBot(dt){
 function updateUnit(e, dt){
   if (!e.alive || e.hp<=0) return;
   if (e.atkCd>0) e.atkCd-=dt;
+  if (e.stun > 0) return;
 
   if (e.type==='creep'){
     const t = findTarget(e);
@@ -317,11 +416,17 @@ function updateUnit(e, dt){
     e.target = findTarget(e);
   }
 
-  if (e.atk>0 && e.atkCd<=0 && e.target && e.target.alive && e.target.hp>0 && dist(e,e.target) <= e.range + e.target.r){
+  if (e.atk>0 && e.atkCd<=0 && e.ethereal<=0 && e.target && e.target.alive && e.target.hp>0 && dist(e,e.target) <= e.range + e.target.r){
     e.atkCd = e.atkInterval;
     dealDamage(e.target, e.atk, e);
     beams.push({ x1:e.x, y1:e.y, x2:e.target.x, y2:e.target.y, t:.1, maxT:.1, color: e.team===0 ? '#7cf' : '#f99' });
   }
+}
+
+function updateEffects(e, dt){
+  if (e.stun>0)     e.stun     = Math.max(0, e.stun-dt);
+  if (e.silence>0)  e.silence  = Math.max(0, e.silence-dt);
+  if (e.ethereal>0) e.ethereal = Math.max(0, e.ethereal-dt);
 }
 
 function updateProjectiles(dt){
@@ -330,7 +435,7 @@ function updateProjectiles(dt){
     for (const o of entities){
       if (!o.alive || o.hp<=0 || o.team===p.team) continue;
       if (Math.hypot(p.x-o.x, p.y-o.y) < p.r + o.r){
-        dealDamage(o, p.dmg, p.owner);
+        dealDamage(o, p.dmg, p.owner, 'magic');
         particles.push({ x:p.x, y:p.y, r:6, t:.3, maxT:.3, color:p.color });
         p.life=0; break;
       }
@@ -345,7 +450,7 @@ function updateAoes(dt){
     a.t -= dt;
     if (a.t <= 0){
       for (const e of entities)
-        if (e.alive && e.team!==a.team && e.hp>0 && dist(a,e) < a.r + e.r) dealDamage(e, a.dmg, player);
+        if (e.alive && e.team!==a.team && e.hp>0 && dist(a,e) < a.r + e.r) dealDamage(e, a.dmg, player, 'magic');
       particles.push({ x:a.x, y:a.y, r:a.r*0.4, t:.4, maxT:.4, color:'#fc6' });
     }
   }
@@ -371,6 +476,7 @@ function updateRespawns(dt){
     e.respawn -= dt;
     if (e.respawn<=0){
       e.alive=true; e.hp=e.maxHp; e.mp=e.maxMp; e.fleeing=false;
+      e.stun=e.silence=e.ethereal=0;
       e.x = BASE[e.team].x + (e.team===0 ? 40 : -40); e.y = BASE[e.team].y;
       e.target=null; e.atkCd=0; e.qCd=e.wCd=e.eCd=e.rCd=0;
     }
@@ -390,6 +496,7 @@ function update(dt){
 
   updatePlayer(dt);
   updateBot(dt);
+  for (const e of entities) updateEffects(e, dt);
   for (const e of entities) updateUnit(e, dt);
   updateProjectiles(dt);
   updateAoes(dt);
@@ -410,7 +517,7 @@ function update(dt){
   updateCam(dt);
 }
 
-// ============ ВИДИМОСТЬ / ТУМАН ============
+// ============ ВИДИМОСТЬ ============
 function isVisible(e){
   for (const a of entities){
     if (!a.alive || a.team!==0 || a.hp<=0) continue;
@@ -461,6 +568,9 @@ function unitInfo(e){
   if (e.type==='creep' || e.type==='hero') L.push(`Скорость ${e.speed}`);
   if (e.type==='hero') L.push(`Убийств ${e.k} · Смертей ${e.d}`);
   if (e.type==='throne' && towersLeft(e.team)>0) L.push(`Неуязвим: башен ${towersLeft(e.team)}`);
+  if (e.stun>0) L.push(`Оцепенение ${e.stun.toFixed(1)}с`);
+  if (e.silence>0) L.push(`Безмолвие ${e.silence.toFixed(1)}с`);
+  if (e.ethereal>0) L.push(`Бесплотность ${e.ethereal.toFixed(1)}с`);
   return L;
 }
 
@@ -477,6 +587,8 @@ function drawEntity(e, showBar){
   if (!e.alive) return;
   const main = e.team===0 ? '#4a90e2' : '#e24a4a';
   const dark = e.team===0 ? '#1a3a6a' : '#6a1a1a';
+  const ghost = e.ethereal>0;
+  ctx.globalAlpha = ghost ? 0.45 : 1;
 
   if (e.type==='tower' || e.type==='throne'){
     const th = e.type==='throne';
@@ -485,7 +597,7 @@ function drawEntity(e, showBar){
     ctx.fillStyle = main; ctx.beginPath(); ctx.arc(e.x, e.y, e.r*(th?.55:.35), 0, 7); ctx.fill();
     if (th){
       ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(e.x, e.y, e.r*.22, 0, 7); ctx.fill();
-      if (towersLeft(e.team)>0){   // щит: трон неуязвим
+      if (towersLeft(e.team)>0){
         ctx.strokeStyle='rgba(255,210,62,.7)'; ctx.setLineDash([6,5]); ctx.lineWidth=2;
         ctx.beginPath(); ctx.arc(e.x, e.y, e.r+12, 0, 7); ctx.stroke(); ctx.setLineDash([]);
       }
@@ -499,6 +611,28 @@ function drawEntity(e, showBar){
     ctx.fillStyle=main; ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, 7); ctx.fill();
     ctx.fillStyle=dark; ctx.beginPath(); ctx.arc(e.x, e.y, e.r*.45, 0, 7); ctx.fill();
   }
+  ctx.globalAlpha = 1;
+
+  // индикаторы эффектов
+  if (e.ethereal>0){
+    ctx.strokeStyle='rgba(140,220,255,.85)'; ctx.lineWidth=2; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r+6, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+  }
+  if (e.silence>0){
+    ctx.strokeStyle='rgba(200,130,255,.9)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r+3, 0, 7); ctx.stroke();
+  }
+  if (e.stun>0){
+    const t = performance.now()/160;
+    for (let i=0;i<3;i++){
+      const a = t + i*2.094;
+      ctx.fillStyle='#ffd23e';
+      ctx.beginPath();
+      ctx.arc(e.x + Math.cos(a)*(e.r+9), e.y - e.r - 12 + Math.sin(a)*4, 2.5, 0, 7);
+      ctx.fill();
+    }
+  }
+
   if (!showBar) return;
   const bw = Math.max(28, e.r*2.4), bh = e.type==='throne' ? 8 : 5, bx = e.x-bw/2, by = e.y-e.r-13;
   ctx.fillStyle='rgba(0,0,0,.75)'; ctx.fillRect(bx-1, by-1, bw+2, bh+2);
@@ -535,6 +669,11 @@ function draw(){
     ring(player.x, player.y, player.range, 'rgba(120,180,255,.18)');
     if (hoverAbil===3) ring(player.x, player.y, 230, 'rgba(255,102,204,.7)', true);
     if (player.wCd<=0 && player.mp>=60 && mouse.sy<VH){ const m=worldMouse(); ring(m.x, m.y, 120, 'rgba(255,180,80,.35)', true); }
+    // подсказка дальности активных предметов
+    for (let i=0;i<ITEMS.length;i++){
+      if (ITEMS[i].active && player.inv[i]>0 && player.icd[i]<=0 && hoverItem(i))
+        ring(player.x, player.y, 500, 'rgba(200,140,255,.25)', true);
+    }
   }
   if (hu) ring(hu.x, hu.y, hu.r+6, '#ffd23e');
 
@@ -570,7 +709,6 @@ function draw(){
   renderFog();
   ctx.drawImage(fogCanvas, 0, 0);
 
-  // всплывающие числа поверх тумана
   for (const f of floats){
     ctx.globalAlpha = clamp(f.t*1.5, 0, 1);
     T(String(f.s), f.x-camX, f.y-camY, f.c, 'bold 14px monospace', 'center');
@@ -578,6 +716,11 @@ function draw(){
   }
 
   drawUI(hu, hoverAbil);
+}
+
+function hoverItem(i){
+  const s = slotI(i);
+  return hit(s.x, s.y, s.s, s.s);
 }
 
 // ============ UI ============
@@ -588,9 +731,10 @@ function fmtTime(t){
 function hintText(){
   const t = gameTime;
   if (t<25)  return 'Герой бьёт врагов рядом сам. Убивай крипов: +35 золота за каждого';
-  if (t<60)  return 'Вернись к базе (слева) и купи предметы: клавиши 1–5 или клик по слоту';
+  if (t<60)  return 'Вернись к базе (слева) и купи предметы: клавиши 1–0 или клик по слоту';
   if (t<100) return 'Q — скиллшот, F — зона, E — хил, R — ульта. Наведи мышь на способность — увидишь описание';
-  if (t<150) return 'Трон врага неуязвим, пока стоят его 3 башни. Сломай их все, затем трон';
+  if (t<150) return 'Новые предметы 6–0: КД, реген, стан, безмолвие, бесплотность. Активные — клавиша/клик';
+  if (t<200) return 'Трон врага неуязвим, пока стоят его 3 башни. Сломай их все, затем трон';
   return '';
 }
 
@@ -600,7 +744,7 @@ function drawBar(){
   ctx.fillStyle=g; ctx.fillRect(0,y0,W,BH);
   ctx.fillStyle='#c9a24a'; ctx.fillRect(0,y0,W,2);
 
-  // --- золото (слева) ---
+  // --- золото ---
   ctx.fillStyle='rgba(0,0,0,.45)'; ctx.fillRect(10, y0+12, 136, 128);
   ctx.strokeStyle='#6b5420'; ctx.lineWidth=1; ctx.strokeRect(10, y0+12, 136, 128);
   T('ЗОЛОТО', 22, y0+32, '#b89a4a', '11px monospace');
@@ -611,7 +755,7 @@ function drawBar(){
   T('Убито крипов: '+player.cs, 22, y0+112, '#aab', '11px monospace');
   T('Убийств: '+player.k+'  Смертей: '+player.d, 22, y0+128, '#aab', '10px monospace');
 
-  // --- герой (портрет, полосы, статистика) ---
+  // --- герой ---
   ctx.fillStyle = player.alive ? '#4a90e2' : '#444';
   ctx.beginPath(); ctx.arc(204, y0+56, 34, 0, 7); ctx.fill();
   ctx.strokeStyle='#c9a24a'; ctx.lineWidth=3; ctx.stroke();
@@ -625,41 +769,54 @@ function drawBar(){
     `Урон ${player.atk}   Дальность ${player.range}`,
     `Атак/с ${(1/player.atkInterval).toFixed(2)}   Скорость ${player.speed}`,
     `Реген HP ${player.regen}/с   MP ${player.mpRegen}/с`,
-    `Фонтан у базы: +50 HP/с, +30 MP/с`,
+    `КД способностей: ${Math.round((1-player.cdMul)*100)}% срез`,
   ];
-  S.forEach((s, i) => T(s, 250, y0+74+i*16, i===3 ? '#7a8a6a' : '#cfd8c0', '11px monospace'));
+  S.forEach((s, i) => T(s, 250, y0+74+i*16, i===3 ? '#c8f' : '#cfd8c0', '11px monospace'));
 
   // --- способности ---
   ABIL.forEach((a, i) => {
-    const s = slotA(i), cd = player[a.cd], noMp = player.mp < a.mp, ready = player.alive && cd<=0 && !noMp;
+    const s = slotA(i), maxCd = a.max * player.cdMul, cd = player[a.cd];
+    const noMp = player.mp < a.mp, ready = player.alive && cd<=0 && !noMp;
     ctx.fillStyle = ready ? 'rgba(40,70,100,.95)' : 'rgba(25,25,25,.95)'; ctx.fillRect(s.x, s.y, s.s, s.s);
     ctx.strokeStyle = ready ? a.col : '#445'; ctx.lineWidth=2; ctx.strokeRect(s.x, s.y, s.s, s.s);
     T(a.k, s.x+s.s/2, s.y+s.s/2+8, '#fff', 'bold 22px monospace', 'center');
     if (cd>0){
-      ctx.fillStyle='rgba(0,0,0,.65)'; ctx.fillRect(s.x, s.y, s.s, s.s*(cd/a.max));
+      ctx.fillStyle='rgba(0,0,0,.65)'; ctx.fillRect(s.x, s.y, s.s, s.s*(cd/maxCd));
       T(cd.toFixed(1), s.x+s.s/2, s.y+s.s/2+5, '#fff', 'bold 14px monospace', 'center');
     }
     T(String(a.mp), s.x+s.s-4, s.y+s.s-5, noMp ? '#f66' : '#6af', 'bold 11px monospace', 'right');
     T(a.name, s.x+s.s/2, s.y+s.s+14, '#9ab', '10px monospace', 'center');
-    if (hit(s.x, s.y, s.s, s.s)) tip = { L:[`${a.k} — ${a.name}`, a.desc, `Мана ${a.mp} · Перезарядка ${a.max}с`], up:true };
+    if (hit(s.x, s.y, s.s, s.s)) tip = { L:[`${a.k} — ${a.name}`, a.desc, `Мана ${a.mp} · Перезарядка ${maxCd.toFixed(1)}с`], up:true };
   });
 
-  // --- предметы ---
-  T('ПРЕДМЕТЫ', 782, y0+20, '#b89a4a', '11px monospace');
+  // --- предметы (2 ряда по 5) ---
+  T('ПРЕДМЕТЫ', 720, y0+16, '#b89a4a', '10px monospace');
   ITEMS.forEach((it, i) => {
-    const s = slotI(i), n = player.inv[i];
-    ctx.fillStyle = n ? 'rgba(90,70,20,.9)' : 'rgba(25,25,25,.95)'; ctx.fillRect(s.x, s.y, s.s, s.s);
-    ctx.strokeStyle = n ? '#ffd23e' : '#556'; ctx.lineWidth=1.5; ctx.strokeRect(s.x, s.y, s.s, s.s);
-    T(it.ch, s.x+s.s/2, s.y+23, n ? '#fff' : '#889', 'bold 16px monospace', 'center');
+    const s = slotI(i), n = player.inv[i], cd = player.icd[i];
+    const owned = n>0;
+    ctx.fillStyle = owned ? (it.active ? 'rgba(70,45,100,.95)' : 'rgba(90,70,20,.9)') : 'rgba(25,25,25,.95)';
+    ctx.fillRect(s.x, s.y, s.s, s.s);
+    ctx.strokeStyle = owned ? (it.active ? '#c8a0ff' : '#ffd23e') : '#556';
+    ctx.lineWidth = 1.5; ctx.strokeRect(s.x, s.y, s.s, s.s);
+    T(it.ch, s.x+s.s/2, s.y+s.s/2+5, owned ? '#fff' : '#889', 'bold 14px monospace', 'center');
     T(it.key, s.x+3, s.y+10, '#9ab', '9px monospace');
-    if (n) T('x'+n, s.x+s.s-3, s.y+s.s-3, '#ffd23e', 'bold 10px monospace', 'right');
-    if (hit(s.x, s.y, s.s, s.s))
-      tip = { L:[it.name, `+${it.d} ${it.lab}`, `Куплено: ${n}`, `Цена: ${it.cost}`, 'Клик или клавиша '+it.key+' — купить (у базы)'], up:true };
+    if (n>1) T('x'+n, s.x+s.s-3, s.y+s.s-3, '#ffd23e', 'bold 9px monospace', 'right');
+    if (cd>0){
+      ctx.fillStyle='rgba(0,0,0,.7)'; ctx.fillRect(s.x, s.y, s.s, s.s*(cd/it.cd));
+      T(Math.ceil(cd), s.x+s.s/2, s.y+s.s/2+4, '#fff', 'bold 11px monospace', 'center');
+    }
+    if (hit(s.x, s.y, s.s, s.s)){
+      const L = [it.name, it.desc];
+      if (it.unique) L.push('Уникальный: покупается один раз');
+      if (it.active) L.push(`Применение: клавиша ${it.key} или клик. CD ${it.cd}с`);
+      L.push(`Куплено: ${n}`);
+      L.push(`Цена: ${it.cost}`);
+      L.push(it.active && n ? `Применить: ${it.key} / клик` : `Купить: ${it.key} / клик (у базы)`);
+      tip = { L, up:true };
+    }
   });
-  T('Покупка — у базы слева', 782, y0+82, '#7a8a6a', '10px monospace');
-  T('P — пауза', 782, y0+98, '#7a8a6a', '10px monospace');
 
-  // --- миникарта (справа) ---
+  // --- миникарта ---
   const mw = 200, mh = mw*WORLD_H/WORLD_W, mx = W-mw-10, my = VH+5;
   ctx.fillStyle='#c9a24a'; ctx.fillRect(mx-2, my-2, mw+4, mh+4);
   ctx.fillStyle='#111a11'; ctx.fillRect(mx, my, mw, mh);
@@ -677,7 +834,7 @@ function drawBar(){
 }
 
 function drawEnemyCard(){
-  const x = W-236, y = 12, w = 224, h = 112, vis = bot.alive && isVisible(bot);
+  const x = W-236, y = 12, w = 224, h = 126, vis = bot.alive && isVisible(bot);
   ctx.fillStyle='rgba(0,0,0,.65)'; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = '#7a2a2a'; ctx.lineWidth=1; ctx.strokeRect(x, y, w, h);
   T('Вражеский герой', x+10, y+18, '#f99', 'bold 12px monospace');
@@ -692,12 +849,19 @@ function drawEnemyCard(){
   T(`Убийств ${bot.k} · Смертей ${bot.d}`, x+10, y+99, '#cfd8c0', '11px monospace');
   if (s) T(s.rCd>0 ? `Ульта: ${Math.ceil(s.rCd)}с` : 'Ульта готова!', x+w-10, y+99, s.rCd>0 ? '#889' : '#f6c', '11px monospace', 'right');
   ctx.globalAlpha = 1;
+  if (vis){
+    const tags=[];
+    if (bot.stun>0) tags.push('ОЦЕП. '+bot.stun.toFixed(1));
+    if (bot.silence>0) tags.push('МОЛЧ. '+bot.silence.toFixed(1));
+    if (bot.ethereal>0) tags.push('ПРИЗРАК '+bot.ethereal.toFixed(1));
+    if (tags.length) T(tags.join('   '), x+10, y+118, '#c8f', '11px monospace');
+  }
 }
 
 function drawTip(L, x, y, up){
   ctx.font = '12px monospace';
   const w = Math.max(...L.map(l => ctx.measureText(l).width)) + 20, h = L.length*16 + 12;
-  x = clamp(x, 4, W-w-4); y = clamp(up ? y-h-10 : y, 4, H-h-4);
+  x = clamp(x, 4, W-w-4); y = clamp(y, 4, H-h-4);
   ctx.fillStyle='rgba(10,14,10,.96)'; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle='#c9a24a'; ctx.lineWidth=1; ctx.strokeRect(x, y, w, h);
   L.forEach((l, i) => T(l, x+10, y+18+i*16, i===0 ? '#ffd23e' : '#dde', i===0 ? 'bold 12px monospace' : '12px monospace'));
@@ -707,7 +871,6 @@ function drawUI(hu){
   drawBar();
   drawEnemyCard();
 
-  // время и волна
   T(fmtTime(gameTime), W/2, 28, '#fff', 'bold 18px monospace', 'center');
   T(`волна через ${Math.ceil(waveTimer)}с`, W/2, 44, '#8a9a8a', '11px monospace', 'center');
   const h = hintText();
@@ -718,24 +881,24 @@ function drawUI(hu){
     T(h, W/2, 70, '#ffd98a', '12px monospace', 'center');
   }
 
-  // лента событий
   logs.forEach((l, i) => {
     ctx.globalAlpha = clamp(l.t/2, 0, 1);
     T(l.s, 14, 24+i*18, '#fff', '12px monospace');
     ctx.globalAlpha = 1;
   });
 
-  // магазин с описаниями (у базы)
-  if (player.alive && dist(player, BASE[0]) < 260){
-    const sw = 440, sh = 30 + ITEMS.length*24, sx = 12, sy = VH-sh-12;
-    ctx.fillStyle='rgba(0,0,0,.8)'; ctx.fillRect(sx, sy, sw, sh);
+  // магазин (две колонки)
+  if (player.alive && dist(player, BASE[0]) < 300){
+    const rows = 5, sw = 520, sh = 40 + rows*24, sx = 12, sy = VH - sh - 12;
+    ctx.fillStyle='rgba(0,0,0,.82)'; ctx.fillRect(sx, sy, sw, sh);
     ctx.strokeStyle='#ffd23e'; ctx.lineWidth=1; ctx.strokeRect(sx, sy, sw, sh);
-    T('МАГАЗИН — нажми цифру или кликни по слоту внизу', sx+10, sy+18, '#ffd23e', 'bold 12px monospace');
+    T('МАГАЗИН — цифра или клик по слоту. Повторный клик по активному предмету — применить', sx+10, sy+18, '#ffd23e', 'bold 11px monospace');
     ITEMS.forEach((it, i) => {
-      const y = sy+44+i*24, ok = gold >= it.cost, cur = player[it.st];
-      T(`[${it.key}] ${it.name}`, sx+10, y, ok ? '#fff' : '#777');
-      T(`+${it.d} ${it.lab} (${cur}→${cur+it.d})`, sx+150, y, ok ? '#9fd' : '#566');
-      T(String(it.cost), sx+sw-10, y, ok ? '#ffd23e' : '#665', '12px monospace', 'right');
+      const col = i<5 ? 0 : 1, row = i%5;
+      const x = sx+14 + col*258, y = sy+42 + row*24;
+      const ok = gold >= it.cost, owned = player.inv[i]>0;
+      T(`[${it.key}] ${it.name}`, x, y, owned ? '#8f8' : ok ? '#fff' : '#777', '12px monospace');
+      T(String(it.cost), x+228, y, ok ? '#ffd23e' : '#665', '12px monospace', 'right');
     });
   }
 
@@ -754,17 +917,19 @@ function drawUI(hu){
     T('P — продолжить', W/2, VH/2+34, '#aab', '14px monospace', 'center');
   }
   if (!started){
-    ctx.fillStyle='rgba(0,0,0,.88)'; ctx.fillRect(0,0,W,H);
-    T('2D DOTA — Fog of War', W/2, 150, '#ffd23e', 'bold 40px monospace', 'center');
+    ctx.fillStyle='rgba(0,0,0,.9)'; ctx.fillRect(0,0,W,H);
+    T('2D DOTA — Big Map & Items', W/2, 130, '#ffd23e', 'bold 38px monospace', 'center');
     [ 'Цель: уничтожь все 3 башни врага, затем его трон (справа).',
+      'Карта увеличена: 3 линии, базы слева и справа.',
       'WASD — движение. Герой сам атакует врагов рядом.',
       'Q — скиллшот · F — зона · E — хил · R — ульта.',
-      'У базы (слева) покупай предметы: клавиши 1–5 или клик по слоту.',
+      'Предметы 1–5 — базовые (можно покупать многократно).',
+      'Предметы 6–0 — уникальные: КД, реген, стан, безмолвие, бесплотность.',
+      'Активные предметы: клавиша или клик по слоту — применить на врага.',
       'Наведи мышь на юнита, способность или предмет — появится описание.',
-      'Карточка справа вверху — статистика вражеского героя.',
       'P — пауза.',
-    ].forEach((s, i) => T(s, W/2, 220+i*30, '#cfd8c0', '16px monospace', 'center'));
-    T('Нажми любую клавишу или кликни, чтобы начать', W/2, 470, '#9ecbff', 'bold 18px monospace', 'center');
+    ].forEach((s, i) => T(s, W/2, 200+i*28, '#cfd8c0', '15px monospace', 'center'));
+    T('Нажми любую клавишу или кликни, чтобы начать', W/2, 490, '#9ecbff', 'bold 18px monospace', 'center');
   }
 }
 
