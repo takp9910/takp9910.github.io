@@ -6,7 +6,7 @@
 :root{
   color-scheme:dark;
   --bg:#0b1118;--p:rgba(12,18,28,.93);--t:#e8eef6;--m:#8fa3b8;
-  --a:#ffd45a;--b:#2a3a4d;
+  --a:#ffd45a;--b:#2a3a4d;--hp:#4ade80;--mp:#60a5fa;--red:#e2555f;
   box-sizing:border-box;
   padding-top:env(safe-area-inset-top,0px);
   padding-bottom:env(safe-area-inset-bottom,0px)
@@ -14,20 +14,85 @@
 html,body{height:100%;margin:0;background:var(--bg);color:var(--t);
   font:13px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
 canvas#c{position:fixed;inset:0;touch-action:none;display:block}
+
 #hint{position:fixed;left:8px;top:calc(env(safe-area-inset-top,0px) + 6px);
   color:var(--m);background:var(--p);padding:4px 8px;border-radius:6px;
   pointer-events:none;font-size:12px;z-index:10}
 #hint b{color:var(--a)}
+
 #mini{position:fixed;right:8px;top:calc(env(safe-area-inset-top,0px) + 6px);
   background:var(--p);border:1px solid var(--b);border-radius:8px;
   padding:4px;z-index:10;pointer-events:none}
 #mini canvas{display:block;border-radius:4px}
+
+/* Панель героя */
+#bar{position:fixed;left:50%;transform:translateX(-50%);
+  bottom:calc(env(safe-area-inset-bottom,0px) + 10px);
+  width:min(560px,calc(100% - 16px));background:var(--p);
+  border:1px solid var(--b);border-radius:12px;padding:8px 10px;
+  z-index:10;display:flex;gap:10px;align-items:center;
+  backdrop-filter:blur(4px)}
+#bar .portrait{width:44px;height:44px;border-radius:8px;
+  background:radial-gradient(circle at 35% 30%,#fff2b8,#ffd45a 45%,#c99b20);
+  flex:none;box-shadow:0 0 0 1px #0006 inset}
+#bar .stats{flex:1;min-width:0}
+#bar .row{display:flex;align-items:center;gap:6px;margin:2px 0}
+#bar .label{color:var(--m);font-size:11px;width:28px}
+#bar .meter{position:relative;height:10px;border-radius:6px;
+  background:#0a0f15;overflow:hidden;flex:1;box-shadow:0 0 0 1px var(--b) inset}
+#bar .fill{position:absolute;inset:0;width:100%;transform-origin:left;
+  transition:transform .12s linear}
+#bar .fill.hp{background:linear-gradient(90deg,#2e9b5b,#4ade80)}
+#bar .fill.mp{background:linear-gradient(90deg,#2f6fd1,#60a5fa)}
+#bar .val{font-size:11px;color:var(--m);min-width:64px;text-align:right;
+  font-variant-numeric:tabular-nums}
+
+#skills{display:flex;gap:6px;margin-top:4px}
+.skill{width:40px;height:40px;border-radius:8px;border:1px solid var(--b);
+  background:#0e1620;color:var(--t);font:600 12px/1 system-ui;
+  position:relative;display:flex;align-items:center;justify-content:center;
+  cursor:pointer;overflow:hidden}
+.skill .cd{position:absolute;inset:0;background:#000a;display:none}
+.skill.disabled{opacity:.5}
+.skill .key{position:absolute;top:2px;left:4px;font-size:9px;color:var(--a)}
+.skill .cost{position:absolute;bottom:2px;right:4px;font-size:9px;color:#7fb4ff}
+
+#msg{position:fixed;left:50%;top:42%;transform:translate(-50%,-50%);
+  font:700 34px/1 system-ui;color:#ffd45a;opacity:0;pointer-events:none;
+  text-shadow:0 4px 18px #000;z-index:20;transition:opacity .25s}
+#msg.show{opacity:1}
 </style>
 </head>
 <body>
   <canvas id="c"></canvas>
-  <div id="hint"><b>WASD / стрелки</b> — движение · враги видны только в тумане</div>
+  <div id="hint"><b>WASD</b> — движение · <b>ЛКМ</b> — атака/движение · <b>Q</b> — снаряд</div>
+
   <div id="mini"><canvas id="mm" width="150" height="100"></canvas></div>
+
+  <div id="bar">
+    <div class="portrait"></div>
+    <div class="stats">
+      <div class="row">
+        <div class="label">HP</div>
+        <div class="meter"><div class="fill hp" id="hpFill"></div></div>
+        <div class="val" id="hpVal">100/100</div>
+      </div>
+      <div class="row">
+        <div class="label">MP</div>
+        <div class="meter"><div class="fill mp" id="mpFill"></div></div>
+        <div class="val" id="mpVal">60/60</div>
+      </div>
+      <div id="skills">
+        <div class="skill" id="skillQ" title="Q — снаряд (25 маны)">
+          <span class="key">Q</span>✦
+          <span class="cost">25</span>
+          <div class="cd" id="cdQ"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="msg"></div>
 
 <script>
 (() => {
@@ -38,7 +103,6 @@ canvas#c{position:fixed;inset:0;touch-action:none;display:block}
   let W = 0, H = 0;
   const DPR = Math.min(devicePixelRatio || 1, 2);
 
-  // ----- Мир (больше экрана) -----
   const WORLD = { w: 2400, h: 1600 };
 
   function resize() {
@@ -52,99 +116,305 @@ canvas#c{position:fixed;inset:0;touch-action:none;display:block}
   addEventListener('resize', resize);
   resize();
 
-  // ----- Герой -----
-  const hero = { x: WORLD.w/2, y: WORLD.h/2, r: 14, speed: 260 };
-  const VIEW_R = 190;                 // радиус обзора (туман)
-  const cam = { x: 0, y: 0 };         // камера (левый верхний угол в мире)
+  // ---------- Герой ----------
+  const hero = {
+    x: WORLD.w/2, y: WORLD.h/2, r: 14, speed: 260,
+    hp: 100, hpMax: 100, mp: 60, mpMax: 60,
+    atkRange: 150, atkDmg: 14, atkCd: 0.55, atkTimer: 0,
+    mpRegen: 6, hpRegen: 2,
+    dead: false, respawn: 0,
+  };
+  const VIEW_R = 190;
+  const cam = { x: 0, y: 0, tx: 0, ty: 0 };
 
-  // ----- Враги -----
+  // ---------- Враги ----------
   const enemies = [];
   const ENEMY_COUNT = 14;
-  for (let i = 0; i < ENEMY_COUNT; i++) {
-    enemies.push({
+  function spawnEnemy() {
+    return {
       x: 120 + Math.random() * (WORLD.w - 240),
       y: 120 + Math.random() * (WORLD.h - 240),
-      r: 12,
-      alive: true,
-      phase: Math.random() * Math.PI * 2,
-    });
+      r: 12, hp: 40, hpMax: 40, hpShow: 40,
+      speed: 95, atkRange: 30, atkDmg: 6, atkCd: 1.0, atkTimer: 0,
+      alive: true, respawn: 0, phase: Math.random() * Math.PI * 2,
+      state: 'patrol', homeX: 0, homeY: 0,
+    };
+  }
+  for (let i = 0; i < ENEMY_COUNT; i++) {
+    const e = spawnEnemy(); e.homeX = e.x; e.homeY = e.y; enemies.push(e);
   }
 
-  // ----- Управление -----
+  // ---------- Снаряды ----------
+  const projectiles = []; // {x,y,vx,vy,r,life,dmg,from:'hero'|'enemy'}
+
+  // ---------- Эффекты ----------
+  const effects = []; // {x,y,r,life,max,color}
+
+  // ---------- Управление ----------
   const keys = {};
+  const mouse = { x: W/2, y: H/2, down: false };
   addEventListener('keydown', e => {
-    keys[e.key.toLowerCase()] = true;
-    if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase())) e.preventDefault();
+    const k = e.key.toLowerCase();
+    keys[k] = true;
+    if (k === 'q') castQ();
+    if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
   });
   addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 
-  // Тач-джойстик (простой): палец задаёт направление
-  let touchVec = null;
+  cv.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  cv.addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    mouse.down = true;
+    handleClick(e.clientX, e.clientY);
+  });
+  addEventListener('mouseup', () => mouse.down = false);
+
+  // Тач
+  let touchMove = null, touchClick = null;
   cv.addEventListener('touchstart', e => {
     const t = e.touches[0];
-    touchVec = { x0: t.clientX, y0: t.clientY, x: t.clientX, y: t.clientY };
+    touchClick = { x: t.clientX, y: t.clientY, t: performance.now() };
+    touchMove = { x0: t.clientX, y0: t.clientY, x: t.clientX, y: t.clientY };
   }, {passive:true});
   cv.addEventListener('touchmove', e => {
-    if (!touchVec) return;
+    if (!touchMove) return;
     const t = e.touches[0];
-    touchVec.x = t.clientX; touchVec.y = t.clientY;
+    touchMove.x = t.clientX; touchMove.y = t.clientY;
+    if (Math.hypot(touchMove.x - touchMove.x0, touchMove.y - touchMove.y0) > 20) touchClick = null;
   }, {passive:true});
-  cv.addEventListener('touchend', () => { touchVec = null; }, {passive:true});
+  cv.addEventListener('touchend', e => {
+    const t = e.changedTouches[0];
+    if (touchClick && performance.now() - touchClick.t < 250) {
+      handleClick(t.clientX, t.clientY);
+    }
+    touchMove = null; touchClick = null;
+  }, {passive:true});
 
-  // ----- Утилиты -----
+  // Клик: по врагу — атака/подход; по земле — движение
+  const moveTarget = { x: null, y: null };
+  function handleClick(sx, sy) {
+    const wx = sx + cam.x, wy = sy + cam.y;
+    const e = pickEnemy(wx, wy);
+    if (e) { attackTarget = e; moveTarget.x = null; }
+    else { attackTarget = null; moveTarget.x = wx; moveTarget.y = wy; }
+  }
+  let attackTarget = null;
+
+  function pickEnemy(wx, wy) {
+    let best = null, bestD = 40;
+    for (const e of enemies) {
+      if (!e.alive) continue;
+      const d = Math.hypot(e.x - wx, e.y - wy);
+      if (d < bestD) { bestD = d; best = e; }
+    }
+    return best;
+  }
+
+  // ---------- Способность Q ----------
+  const Q = { cd: 2.5, timer: 0, cost: 25, speed: 600, dmg: 24, radius: 6 };
+  function castQ() {
+    if (Q.timer > 0 || hero.mp < Q.cost || hero.dead) return;
+    hero.mp -= Q.cost;
+    Q.timer = Q.cd;
+    const hx = hero.x - cam.x, hy = hero.y - cam.y;
+    let tx = mouse.x, ty = mouse.y;
+    if (touchMove) { tx = touchMove.x; ty = touchMove.y; }
+    let dx = tx - hx, dy = ty - hy;
+    const len = Math.hypot(dx, dy) || 1;
+    dx /= len; dy /= len;
+    projectiles.push({
+      x: hero.x + dx * hero.r, y: hero.y + dy * hero.r,
+      vx: dx * Q.speed, vy: dy * Q.speed,
+      r: Q.radius, life: 1.1, dmg: Q.dmg, from: 'hero'
+    });
+    spawnEffect(hero.x, hero.y, 26, 0.18, '#ffd45a');
+    updateSkillUI();
+  }
+
+  // ---------- Утилиты ----------
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
   const dist2 = (ax, ay, bx, by) => (ax-bx)*(ax-bx) + (ay-by)*(ay-by);
 
-  // ----- Игровой цикл -----
+  function spawnEffect(x, y, r, life, color) {
+    effects.push({ x, y, r, life, max: life, color });
+  }
+
+  // ---------- Игровой цикл ----------
   let last = performance.now();
   function loop(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-
-    // --- движение героя ---
-    let dx = 0, dy = 0;
-    if (keys['a'] || keys['arrowleft'])  dx -= 1;
-    if (keys['d'] || keys['arrowright']) dx += 1;
-    if (keys['w'] || keys['arrowup'])    dy -= 1;
-    if (keys['s'] || keys['arrowdown'])  dy += 1;
-
-    if (touchVec) {
-      const tx = touchVec.x - touchVec.x0;
-      const ty = touchVec.y - touchVec.y0;
-      const len = Math.hypot(tx, ty);
-      if (len > 12) { dx = tx / len; dy = ty / len; }
-    }
-
-    const len = Math.hypot(dx, dy);
-    if (len > 0) {
-      hero.x = clamp(hero.x + (dx/len) * hero.speed * dt, hero.r, WORLD.w - hero.r);
-      hero.y = clamp(hero.y + (dy/len) * hero.speed * dt, hero.r, WORLD.h - hero.r);
-    }
-
-    // --- камера следует за героем ---
-    cam.x = clamp(hero.x - W/2, 0, Math.max(0, WORLD.w - W));
-    cam.y = clamp(hero.y - H/2, 0, Math.max(0, WORLD.h - H));
-
-    // --- враги: лёгкое блуждание ---
-    for (const e of enemies) {
-      if (!e.alive) continue;
-      e.phase += dt;
-      e.x = clamp(e.x + Math.cos(e.phase * 0.6) * 24 * dt, e.r, WORLD.w - e.r);
-      e.y = clamp(e.y + Math.sin(e.phase * 0.9) * 24 * dt, e.r, WORLD.h - e.r);
-    }
-
+    update(dt);
     draw();
     drawMinimap();
+    updateUI();
     requestAnimationFrame(loop);
   }
 
-  // ----- Отрисовка -----
+  function update(dt) {
+    // Респаун героя
+    if (hero.dead) {
+      hero.respawn -= dt;
+      if (hero.respawn <= 0) {
+        hero.dead = false;
+        hero.hp = hero.hpMax; hero.mp = hero.mpMax;
+        hero.x = WORLD.w/2; hero.y = WORLD.h/2;
+      }
+    } else {
+      // Реген
+      hero.hp = Math.min(hero.hpMax, hero.hp + hero.hpRegen * dt);
+      hero.mp = Math.min(hero.mpMax, hero.mp + hero.mpRegen * dt);
+      if (Q.timer > 0) Q.timer = Math.max(0, Q.timer - dt);
+      if (hero.atkTimer > 0) hero.atkTimer = Math.max(0, hero.atkTimer - dt);
+
+      // Движение: клавиши
+      let dx = 0, dy = 0;
+      if (keys['a'] || keys['arrowleft'])  dx -= 1;
+      if (keys['d'] || keys['arrowright']) dx += 1;
+      if (keys['w'] || keys['arrowup'])    dy -= 1;
+      if (keys['s'] || keys['arrowdown'])  dy += 1;
+
+      if (touchMove) {
+        const tx = touchMove.x - touchMove.x0;
+        const ty = touchMove.y - touchMove.y0;
+        const l = Math.hypot(tx, ty);
+        if (l > 16) { dx = tx / l; dy = ty / l; }
+      }
+
+      if (dx || dy) {
+        // Ручное управление отменяет цель
+        moveTarget.x = moveTarget.y = null;
+        attackTarget = null;
+        const l = Math.hypot(dx, dy);
+        hero.x = clamp(hero.x + dx/l * hero.speed * dt, hero.r, WORLD.w - hero.r);
+        hero.y = clamp(hero.y + dy/l * hero.speed * dt, hero.r, WORLD.h - hero.r);
+      } else if (attackTarget && attackTarget.alive) {
+        const d = Math.hypot(attackTarget.x - hero.x, attackTarget.y - hero.y);
+        if (d > hero.atkRange - attackTarget.r - 4) {
+          const ang = Math.atan2(attackTarget.y - hero.y, attackTarget.x - hero.x);
+          hero.x = clamp(hero.x + Math.cos(ang) * hero.speed * dt, hero.r, WORLD.w - hero.r);
+          hero.y = clamp(hero.y + Math.sin(ang) * hero.speed * dt, hero.r, WORLD.h - hero.r);
+        } else {
+          tryHeroAttack(attackTarget);
+        }
+      } else if (moveTarget.x != null) {
+        const d = Math.hypot(moveTarget.x - hero.x, moveTarget.y - hero.y);
+        if (d > 6) {
+          const ang = Math.atan2(moveTarget.y - hero.y, moveTarget.x - hero.x);
+          hero.x = clamp(hero.x + Math.cos(ang) * hero.speed * dt, hero.r, WORLD.w - hero.r);
+          hero.y = clamp(hero.y + Math.sin(ang) * hero.speed * dt, hero.r, WORLD.h - hero.r);
+        } else {
+          moveTarget.x = moveTarget.y = null;
+        }
+      }
+    }
+
+    // Камера (плавно)
+    cam.tx = clamp(hero.x - W/2, 0, Math.max(0, WORLD.w - W));
+    cam.ty = clamp(hero.y - H/2, 0, Math.max(0, WORLD.h - H));
+    cam.x += (cam.tx - cam.x) * Math.min(1, dt * 10);
+    cam.y += (cam.ty - cam.y) * Math.min(1, dt * 10);
+
+    // Враги
+    const viewR2 = VIEW_R * VIEW_R;
+    for (const e of enemies) {
+      if (!e.alive) {
+        e.respawn -= dt;
+        if (e.respawn <= 0) {
+          e.alive = true;
+          e.hp = e.hpMax; e.hpShow = e.hpMax;
+          e.x = 120 + Math.random() * (WORLD.w - 240);
+          e.y = 120 + Math.random() * (WORLD.h - 240);
+          e.homeX = e.x; e.homeY = e.y;
+          e.state = 'patrol';
+        }
+        continue;
+      }
+      if (e.atkTimer > 0) e.atkTimer = Math.max(0, e.atkTimer - dt);
+
+      const dHero = Math.hypot(hero.x - e.x, hero.y - e.y);
+      const canSeeHero = !hero.dead && dHero < VIEW_R + 40;
+
+      if (canSeeHero && dHero < 260) {
+        e.state = 'chase';
+      } else if (e.state === 'chase' && dHero > 340) {
+        e.state = 'patrol';
+      }
+
+      if (e.state === 'chase' && !hero.dead) {
+        if (dHero > e.atkRange + hero.r - 4) {
+          const ang = Math.atan2(hero.y - e.y, hero.x - e.x);
+          e.x = clamp(e.x + Math.cos(ang) * e.speed * dt, e.r, WORLD.w - e.r);
+          e.y = clamp(e.y + Math.sin(ang) * e.speed * dt, e.r, WORLD.h - e.r);
+        } else if (e.atkTimer <= 0) {
+          hero.hp -= e.atkDmg;
+          e.atkTimer = e.atkCd;
+          spawnEffect(hero.x, hero.y, 22, 0.2, '#e2555f');
+          if (hero.hp <= 0 && !hero.dead) {
+            hero.dead = true; hero.respawn = 3.5;
+            showMsg('ВЫ ПОГИБЛИ');
+          }
+        }
+      } else {
+        // патруль вокруг дома
+        e.phase += dt;
+        const tx = e.homeX + Math.cos(e.phase * 0.7) * 60;
+        const ty = e.homeY + Math.sin(e.phase * 0.9) * 60;
+        const ang = Math.atan2(ty - e.y, tx - e.x);
+        if (Math.hypot(tx - e.x, ty - e.y) > 4) {
+          e.x = clamp(e.x + Math.cos(ang) * e.speed * 0.5 * dt, e.r, WORLD.w - e.r);
+          e.y = clamp(e.y + Math.sin(ang) * e.speed * 0.5 * dt, e.r, WORLD.h - e.r);
+        }
+      }
+      // плавная полоска
+      e.hpShow += (e.hp - e.hpShow) * Math.min(1, dt * 8);
+    }
+
+    // Снаряды
+    for (let i = projectiles.length - 1; i >= 0; i--) {
+      const p = projectiles[i];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+      let dead = p.life <= 0 || p.x < 0 || p.y < 0 || p.x > WORLD.w || p.y > WORLD.h;
+      if (!dead && p.from === 'hero') {
+        for (const e of enemies) {
+          if (!e.alive) continue;
+          if (dist2(p.x, p.y, e.x, e.y) < (p.r + e.r) * (p.r + e.r)) {
+            e.hp -= p.dmg;
+            spawnEffect(p.x, p.y, 20, 0.2, '#ffd45a');
+            if (e.hp <= 0) {
+              e.alive = false; e.respawn = 6;
+              spawnEffect(e.x, e.y, 34, 0.35, '#e2555f');
+            }
+            dead = true; break;
+          }
+        }
+      }
+      if (dead) projectiles.splice(i, 1);
+    }
+
+    // Эффекты
+    for (let i = effects.length - 1; i >= 0; i--) {
+      const f = effects[i]; f.life -= dt;
+      if (f.life <= 0) effects.splice(i, 1);
+    }
+  }
+
+  function tryHeroAttack(e) {
+    if (hero.atkTimer > 0) return;
+    hero.atkTimer = hero.atkCd;
+    e.hp -= hero.atkDmg;
+    spawnEffect(e.x, e.y, 18, 0.18, '#ffd45a');
+    if (e.hp <= 0) {
+      e.alive = false; e.respawn = 6;
+      spawnEffect(e.x, e.y, 34, 0.35, '#e2555f');
+    }
+  }
+
+  // ---------- Отрисовка ----------
   function draw() {
-    // фон
     ctx.fillStyle = '#0b1118';
     ctx.fillRect(0, 0, W, H);
 
-    // сетка карты (в экранных координатах, с учётом камеры)
     const gs = 96;
     ctx.strokeStyle = '#16212d';
     ctx.lineWidth = 1;
@@ -155,48 +425,106 @@ canvas#c{position:fixed;inset:0;touch-action:none;display:block}
     for (let y = startY; y < H; y += gs) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
     ctx.stroke();
 
-    // границы мира
     ctx.strokeStyle = '#2a3a4d';
     ctx.lineWidth = 3;
     ctx.strokeRect(-cam.x, -cam.y, WORLD.w, WORLD.h);
 
-    // враги (только те, что в радиусе обзора)
+    // Цель движения
+    if (moveTarget.x != null) {
+      ctx.strokeStyle = 'rgba(255,212,90,.6)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(moveTarget.x - cam.x, moveTarget.y - cam.y, 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Враги (только видимые)
     const viewR2 = VIEW_R * VIEW_R;
     for (const e of enemies) {
       if (!e.alive) continue;
-      if (dist2(e.x, e.y, hero.x, hero.y) > viewR2) continue; // скрыт туманом
+      if (dist2(e.x, e.y, hero.x, hero.y) > viewR2) continue;
       const sx = e.x - cam.x, sy = e.y - cam.y;
+      // тело
       ctx.beginPath();
       ctx.arc(sx, sy, e.r, 0, Math.PI * 2);
-      ctx.fillStyle = '#e2555f';
+      ctx.fillStyle = e.state === 'chase' ? '#ff6b76' : '#e2555f';
       ctx.fill();
       ctx.strokeStyle = '#ff9aa1';
       ctx.lineWidth = 2;
       ctx.stroke();
+      // hp bar
+      const bw = 30, bh = 4;
+      const ratio = clamp(e.hpShow / e.hpMax, 0, 1);
+      ctx.fillStyle = '#000a';
+      ctx.fillRect(sx - bw/2, sy - e.r - 10, bw, bh);
+      ctx.fillStyle = '#4ade80';
+      ctx.fillRect(sx - bw/2, sy - e.r - 10, bw * ratio, bh);
+      // выделение цели
+      if (attackTarget === e) {
+        ctx.strokeStyle = '#ffd45a';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(sx, sy, e.r + 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
 
-    // герой
-    const hx = hero.x - cam.x, hy = hero.y - cam.y;
-    ctx.beginPath();
-    ctx.arc(hx, hy, hero.r, 0, Math.PI * 2);
-    ctx.fillStyle = '#ffd45a';
-    ctx.fill();
-    ctx.strokeStyle = '#fff2b8';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // Снаряды
+    for (const p of projectiles) {
+      ctx.beginPath();
+      ctx.arc(p.x - cam.x, p.y - cam.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = p.from === 'hero' ? '#fff2b8' : '#ff9aa1';
+      ctx.fill();
+      ctx.strokeStyle = p.from === 'hero' ? '#ffd45a' : '#e2555f';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
 
-    // туман войны: затемнение вокруг героя радиальным градиентом
-    const g = ctx.createRadialGradient(hx, hy, VIEW_R * 0.55, hx, hy, VIEW_R);
-    g.addColorStop(0, 'rgba(5,8,12,0)');
-    g.addColorStop(1, 'rgba(5,8,12,0.97)');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
+    // Герой
+    if (!hero.dead) {
+      const hx = hero.x - cam.x, hy = hero.y - cam.y;
+      ctx.beginPath();
+      ctx.arc(hx, hy, hero.r, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffd45a';
+      ctx.fill();
+      ctx.strokeStyle = '#fff2b8';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // hp bar героя над головой (тонкая)
+      const bw = 40, bh = 4;
+      const hr = clamp(hero.hp / hero.hpMax, 0, 1);
+      ctx.fillStyle = '#000a';
+      ctx.fillRect(hx - bw/2, hy - hero.r - 12, bw, bh);
+      ctx.fillStyle = '#4ade80';
+      ctx.fillRect(hx - bw/2, hy - hero.r - 12, bw * hr, bh);
+    }
 
-    // ещё сильнее затемняем за пределами радиуса (чтобы враги точно не "просвечивали")
-    // (градиент уже почти непрозрачен — этого достаточно)
+    // Эффекты
+    for (const f of effects) {
+      const t = f.life / f.max;
+      ctx.globalAlpha = t;
+      ctx.beginPath();
+      ctx.arc(f.x - cam.x, f.y - cam.y, f.r * (1.2 - t * 0.4), 0, Math.PI * 2);
+      ctx.strokeStyle = f.color;
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    // Туман войны
+    if (!hero.dead) {
+      const hx = hero.x - cam.x, hy = hero.y - cam.y;
+      const g = ctx.createRadialGradient(hx, hy, VIEW_R * 0.55, hx, hy, VIEW_R);
+      g.addColorStop(0, 'rgba(5,8,12,0)');
+      g.addColorStop(1, 'rgba(5,8,12,0.97)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+    } else {
+      ctx.fillStyle = 'rgba(5,8,12,0.97)';
+      ctx.fillRect(0, 0, W, H);
+    }
   }
 
-  // ----- Миникарта -----
   function drawMinimap() {
     const mw = mm.width, mh = mm.height;
     const sx = mw / WORLD.w, sy = mh / WORLD.h;
@@ -204,27 +532,63 @@ canvas#c{position:fixed;inset:0;touch-action:none;display:block}
     mctx.fillStyle = '#0e1620';
     mctx.fillRect(0, 0, mw, mh);
 
-    // враги
     for (const e of enemies) {
       if (!e.alive) continue;
-      const visible = dist2(e.x, e.y, hero.x, hero.y) <= VIEW_R * VIEW_R;
-      if (!visible) continue;
+      if (dist2(e.x, e.y, hero.x, hero.y) > VIEW_R * VIEW_R) continue;
       mctx.fillStyle = '#e2555f';
       mctx.beginPath();
       mctx.arc(e.x * sx, e.y * sy, 2.2, 0, Math.PI * 2);
       mctx.fill();
     }
 
-    // герой
-    mctx.fillStyle = '#ffd45a';
-    mctx.beginPath();
-    mctx.arc(hero.x * sx, hero.y * sy, 3, 0, Math.PI * 2);
-    mctx.fill();
+    if (!hero.dead) {
+      mctx.fillStyle = '#ffd45a';
+      mctx.beginPath();
+      mctx.arc(hero.x * sx, hero.y * sy, 3, 0, Math.PI * 2);
+      mctx.fill();
+    }
 
-    // прямоугольник камеры
     mctx.strokeStyle = 'rgba(255,255,255,.35)';
     mctx.lineWidth = 1;
     mctx.strokeRect(cam.x * sx, cam.y * sy, W * sx, H * sy);
+  }
+
+  // ---------- UI ----------
+  const hpFill = document.getElementById('hpFill');
+  const mpFill = document.getElementById('mpFill');
+  const hpVal  = document.getElementById('hpVal');
+  const mpVal  = document.getElementById('mpVal');
+  const cdQ    = document.getElementById('cdQ');
+  const skillQ = document.getElementById('skillQ');
+
+  skillQ.addEventListener('click', castQ);
+
+  function updateUI() {
+    hpFill.style.transform = `scaleX(${clamp(hero.hp / hero.hpMax, 0, 1)})`;
+    mpFill.style.transform = `scaleX(${clamp(hero.mp / hero.mpMax, 0, 1)})`;
+    hpVal.textContent = `${Math.max(0, Math.ceil(hero.hp))}/${hero.hpMax}`;
+    mpVal.textContent = `${Math.floor(hero.mp)}/${hero.mpMax}`;
+    updateSkillUI();
+  }
+  function updateSkillUI() {
+    if (Q.timer > 0) {
+      cdQ.style.display = 'block';
+      cdQ.textContent = Q.timer.toFixed(1);
+      cdQ.style.color = '#fff';
+      cdQ.style.font = '600 12px system-ui';
+      cdQ.style.textAlign = 'center';
+      cdQ.style.paddingTop = '13px';
+    } else cdQ.style.display = 'none';
+    skillQ.classList.toggle('disabled', hero.mp < Q.cost || hero.dead);
+  }
+
+  let msgTimer = null;
+  const msgEl = document.getElementById('msg');
+  function showMsg(text) {
+    msgEl.textContent = text;
+    msgEl.classList.add('show');
+    clearTimeout(msgTimer);
+    msgTimer = setTimeout(() => msgEl.classList.remove('show'), 1600);
   }
 
   requestAnimationFrame(loop);
